@@ -1,8 +1,12 @@
-import gspread
+import statistics
+import time
+
 import gspread as gs
 from oauth2client.service_account import ServiceAccountCredentials
 
-print("Iniciando..")
+
+print("Versión 1.1.0 - camilohernandezcueto@gmail.com")
+print("\nIniciando..")
 
 # Conseguimos las credenciales para usar la API de Google Drive
 scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -11,11 +15,13 @@ creds = ServiceAccountCredentials.from_json_keyfile_name('creds.json', scope)
 cliente = gs.authorize(creds)
 
 # Abrimos el meta-archivo y el archivo de Resultados
-print("Consiguiendo lista de archivos..")
+print("Consiguiendo lista de archivos y correos..")
 meta = None
+emails = None
 try:
     meta = cliente.open("Meta").sheet1
-except gspread.exceptions.SpreadsheetNotFound:
+    emails = cliente.open("TRABAJADORES 2019-2020").sheet1
+except gs.exceptions.SpreadsheetNotFound:
     print("ERROR: No se ha encontrado el archivo de metadatos")
     exit(1)
 
@@ -23,7 +29,7 @@ print("Abriendo archivo de resultados")
 resultado = None
 try:
     resultado = cliente.open("Resultados").sheet1
-except gspread.exceptions.SpreadsheetNotFound:
+except gs.exceptions.SpreadsheetNotFound:
     print("ERROR: No se ha encontrado el archivo de metadatos")
     exit(1)
 
@@ -35,79 +41,153 @@ num_archivos_solicitados = len(archivos_nombres_meta)
 actual = 1
 
 print("Recuperando evaluaciones desde el servidor..")
-print("Numero de evaluaciones: %s" % num_archivos_solicitados)
 
 archivos = []
 for archivo in archivos_nombres_meta:
     print("Abriendo archivo: %s (%d/%d)" % (archivo, actual, num_archivos_solicitados))
     try:
         archivos.append(cliente.open(archivo).sheet1)
-    except gspread.exceptions.SpreadsheetNotFound:
+    except gs.exceptions.SpreadsheetNotFound:
         print("ERROR: No se ha encontrado el archivo")
         exit(1)
 
     actual += 1
+    time.sleep(20)
 
 if len(archivos) == 0:
     print("ERROR: No hay ningún archivo para analizar!")
     exit(1)
 
+archivos_con_tipo = dict(zip(archivos, archivos_tipos_meta))
+
 num_archivos = len(archivos)
 print("Archivos recuperados: %d de %d" % (num_archivos, num_archivos_solicitados))
-
-archivos_con_tipo = dict(zip(archivos, archivos_tipos_meta))
 
 num_evaluacion = 1
 print("Calculando..")
 
 cache_notas = {}
-for archivo, tipo in archivos_con_tipo.items():
-    print("%s, %s (%d/%d):" % (archivo.id, tipo, num_evaluacion, num_archivos))
+cache_autoevaluaciones_emails = {}
 
-    row_count = archivo.row_count
-    for row_num in range(2, row_count):
-        row = archivo.row_values(row_num)[1:]
-        if not row:
+puntaje = 0
+puntaje_max = 0
+
+for archivo, tipo in archivos_con_tipo.items():
+    print("%s (%d/%d):" % (archivo.id, num_evaluacion, num_archivos))
+
+    if tipo == "AC" or tipo == "ACM":
+        for row_num in range(2, archivo.row_count):
+            row = archivo.row_values(row_num)[1:10]
+            if not row:
+                break
+
+            correo = row[0]
+            auto = row[1:]
+
+            puntaje_auto = 0
+            puntaje_auto_max = 0
+            for nota in auto:
+                puntaje_auto += int(nota.split(" ")[0])
+                puntaje_auto_max += 4
+
+            nota_auto = puntaje_auto / puntaje_auto_max
+            cache_autoevaluaciones_emails[correo] = nota_auto
+
+            print("\tAutoevaluación: %s, Nota: %.2f" % (correo, nota_auto))
+
+        time.sleep(60)
+
+    contador = 1
+    nota = 0
+
+    start = 3
+    if tipo == "AC":
+        start = 11
+    if tipo == "ACM":
+        start = 15
+
+    nombre_anterior = None
+    for col_num in range(start + 1, archivo.col_count):
+        col_header = archivo.cell(1, col_num).value
+        if col_header == " " or None:
             break
 
-        funcionario = None
-        comienzo_notas = None
+        col_notas = archivo.col_values(col_num)[1:]
 
-        if str(tipo) == "AUTO":
-            funcionario = row[0]
-            comienzo_notas = 1
+        nombre = col_header.split(" [")[0]
 
-        puntaje_max = 0
-        puntaje = 0
+        if nombre_anterior is None:
+            nombre_anterior = nombre
 
-        for espacio in row[comienzo_notas:]:
-            if espacio is "" or None:
+        if nombre != nombre_anterior:
+
+            if puntaje_max == 0:
+                break
+
+            nota = puntaje / puntaje_max
+            print("\tFuncionario: %s, Nota: %.2f" % (nombre_anterior, nota))
+
+            time.sleep(30)
+
+            if nombre_anterior in cache_notas:
+                cache_notas[nombre_anterior] = statistics.mean([nota, cache_notas[nombre_anterior]])
+            else:
+                cache_notas[nombre_anterior] = nota
+
+            # Reiniciamos los valores
+            nota = 0
+            puntaje = 0
+            puntaje_max = 0
+            nombre_anterior = None
+
+        for espacio in col_notas:
+
+            if espacio == "" or None:
                 break
 
             puntaje += int(espacio.split(" ")[0])
-            puntaje_max += 3
+            puntaje_max += 4
 
-        nota = 10 * (puntaje / puntaje_max)
+    num_evaluacion += 1
 
-        print("\tFuncionario: %s, Nota: %.2f" % (funcionario, nota))
+print("Interpretando correos:")
+cache_autoevaluaciones = {}
+for email, nota_emails in cache_autoevaluaciones_emails.items():
+    try:
+        email_cell = emails.find(email)
+    except gs.exceptions.CellNotFound:
+        print("\t%s => NOMBRE NO ENCONTRADO" % email)
+        continue
+    finally:
+        time.sleep(30)
 
-        if funcionario in cache_notas.values():
-            cache_notas[funcionario] += nota
-            break
+    name_cell = emails.cell(email_cell.row, email_cell.col-1)
+    name_compress = name_cell.value.lower().replace(" ", "")
 
-        cache_notas[funcionario] = nota
+    print("\t%s => %s" % (email, name_cell.value))
+    cache_autoevaluaciones[name_compress] = nota_emails
 
-print("Guardando resultados..")
+print("Uniendo auto y coevaluaciones..")
+for key, val in cache_notas.items():
+    nota = cache_notas[key]
+    name_compress = key.lower().replace(" ", "")
+
+    if name_compress in cache_autoevaluaciones:
+        nota = statistics.mean([nota, cache_autoevaluaciones[name_compress]])
+
+    cache_notas[key] = nota
+
+print("Iniciando escritura de resultados..")
 
 resultado.update_cell(1, 1, "Funcionario")
 resultado.update_cell(1, 2, "Nota")
 
 cursor_row = 2
 
-print("Escribiendo información para %s funcionarios.." % len(cache_notas.keys()))
-for key in sorted(cache_notas, key=cache_notas.get):
+print("Escribiendo información de %s funcionarios.." % len(cache_notas.keys()))
+for key in sorted(cache_notas, key=cache_notas.get, reverse=True):
     resultado.update_cell(cursor_row, 1, key)
     resultado.update_cell(cursor_row, 2, cache_notas[key])
+    cursor_row += 1
 
-print("Resultados generados con exito")
-
+print("\nResultados generados con exito")
